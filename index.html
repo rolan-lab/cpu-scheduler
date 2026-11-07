@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scheduler Mission Control</title>
+<meta name="description" content="Interactive CPU scheduling simulator for CS3608 Operating Systems.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Animated grid behind everything (pure decoration). -->
+  <div class="backdrop" aria-hidden="true"></div>
+
+  <!-- ===================================================================
+       TOP BAR: title, mode tabs, live telemetry
+       =================================================================== -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span></span></div>
+      <div>
+        <h1>CPU Scheduling <span>Mission Control</span></h1>
+        <p class="brand-sub">CS3608 · Operating Systems</p>
+      </div>
+    </div>
+
+    <nav class="mode-tabs" role="tablist" aria-label="Mode">
+      <button type="button" role="tab" id="tabSimulate" aria-selected="true" aria-controls="viewSimulate">Simulate</button>
+      <button type="button" role="tab" id="tabCompare" aria-selected="false" aria-controls="viewCompare">Compare all</button>
+    </nav>
+
+    <div class="telemetry" aria-label="Telemetry">
+      <div class="tele">
+        <span class="tele-label">Algorithm</span>
+        <span class="tele-value" id="teleAlgo">-</span>
+      </div>
+      <div class="tele">
+        <span class="tele-label">Clock</span>
+        <span class="tele-value mono" id="teleClock">T+00 / 00</span>
+      </div>
+      <div class="tele">
+        <span class="tele-label">Status</span>
+        <span class="tele-value" id="teleStatus" data-status="paused"><i class="status-dot" aria-hidden="true"></i><span id="teleStatusText">Paused</span></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- =================================================================
+         SIDEBAR: the workload and the scheduler settings
+         ================================================================= -->
+    <aside class="sidebar">
+      <section class="panel" aria-labelledby="hWorkload">
+        <header class="panel-head">
+          <h2 id="hWorkload">Workload</h2>
+          <span class="panel-meta mono" id="procCount">0 / 10</span>
+        </header>
+
+        <div class="table-wrap">
+          <table class="proc-table">
+            <thead>
+              <tr>
+                <th scope="col"><span class="sr-only">Color</span></th>
+                <th scope="col">PID</th>
+                <th scope="col">Arrival</th>
+                <th scope="col">Burst</th>
+                <th scope="col">Priority</th>
+                <th scope="col"><span class="sr-only">Remove</span></th>
+              </tr>
+            </thead>
+            <tbody id="procBody"></tbody>
+          </table>
+        </div>
+
+        <div class="row-actions">
+          <button type="button" class="btn" id="btnAdd">+ Add process</button>
+          <select class="select" id="presetSelect" aria-label="Load a preset workload">
+            <option value="">Load preset…</option>
+          </select>
+        </div>
+
+        <div class="generator">
+          <label class="mini-field"><span>Count</span><input type="number" id="genCount" min="2" max="10" step="1" value="5"></label>
+          <label class="mini-field"><span>Seed</span><input type="number" id="genSeed" step="1" value="42"></label>
+          <button type="button" class="btn" id="btnGenerate">Generate</button>
+          <button type="button" class="btn btn-icon" id="btnDice" title="Generate with a new random seed" aria-label="Generate with a new random seed">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/><circle cx="15" cy="15" r="1.5" fill="currentColor"/><circle cx="15" cy="9" r="1.5" fill="currentColor"/><circle cx="9" cy="15" r="1.5" fill="currentColor"/></svg>
+          </button>
+        </div>
+
+        <div class="io-actions">
+          <button type="button" class="btn btn-ghost" id="btnExport">Export JSON</button>
+          <button type="button" class="btn btn-ghost" id="btnImport">Import JSON</button>
+          <input type="file" id="fileImport" accept=".json,application/json" hidden>
+        </div>
+
+        <ul class="errors" id="errors" aria-live="polite"></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="hScheduler">
+        <header class="panel-head">
+          <h2 id="hScheduler">Scheduler</h2>
+        </header>
+
+        <div class="algo-grid" id="algoGrid" role="radiogroup" aria-label="Scheduling algorithm"></div>
+        <p class="algo-desc" id="algoDesc"></p>
+
+        <div class="field-grid">
+          <label class="field" id="fieldQuantum">
+            <span>Time quantum</span>
+            <input type="number" id="optQuantum" min="1" step="1" value="2">
+          </label>
+          <label class="field">
+            <span>Context switch</span>
+            <input type="number" id="optSwitch" min="0" step="1" value="0">
+          </label>
+        </div>
+
+        <fieldset class="aging" id="fieldAging">
+          <legend>
+            <label class="switch">
+              <input type="checkbox" id="optAging">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span>Aging</span>
+            </label>
+          </legend>
+          <div class="field-grid">
+            <label class="field">
+              <span>Every (ticks)</span>
+              <input type="number" id="optAgingEvery" min="1" step="1" value="5">
+            </label>
+            <label class="field">
+              <span>Improve by</span>
+              <input type="number" id="optAgingBy" min="1" step="1" value="1">
+            </label>
+          </div>
+        </fieldset>
+
+        <p class="conventions">Ties go to the earlier arrival, then the lower PID.
+          Lower number = higher priority. RR: a newcomer joins the queue before the process whose quantum expired.</p>
+      </section>
+    </aside>
+
+    <div class="views">
+      <!-- ===============================================================
+           SIMULATE VIEW
+           =============================================================== -->
+      <div class="view" id="viewSimulate" role="tabpanel" aria-labelledby="tabSimulate">
+
+        <!-- The centerpiece: the process state machine with the CPU core -->
+        <section class="panel stage-panel" aria-labelledby="hStage">
+          <header class="panel-head">
+            <h2 id="hStage">Process state machine</h2>
+            <span class="panel-meta mono" id="stageMeta"></span>
+          </header>
+
+          <div class="stage" id="stage">
+            <svg class="flow" id="flow" aria-hidden="true">
+              <defs>
+                <marker id="arrowHead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z"></path>
+                </marker>
+              </defs>
+              <g id="flowPaths"></g>
+            </svg>
+
+            <div class="zone zone-new" id="zoneNew"><span class="zone-label">New</span></div>
+            <div class="zone zone-ready" id="zoneReady">
+              <span class="zone-label">Ready queue</span>
+              <span class="lane-rule mono" id="readyRule"></span>
+              <span class="lane-head mono">head</span>
+            </div>
+            <div class="cpu-cell">
+              <div class="cpu" id="cpu" data-kind="idle">
+                <div class="cpu-halo"></div>
+                <div class="cpu-pins"></div>
+                <div class="cpu-ring" id="cpuRing"></div>
+                <div class="cpu-core"><div class="cpu-die"></div></div>
+                <div class="cpu-flash"></div>
+              </div>
+              <div class="cpu-readout">
+                <span class="cpu-status mono" id="cpuStatus">Idle</span>
+                <span class="cpu-detail mono" id="cpuDetail">-</span>
+              </div>
+            </div>
+            <div class="zone zone-done" id="zoneDone"><span class="zone-label">Terminated</span></div>
+
+            <div class="tokens" id="tokens" aria-hidden="true"></div>
+            <canvas class="fx" id="fx" aria-hidden="true"></canvas>
+            <div class="stage-error" id="stageError" hidden></div>
+          </div>
+
+          <div class="narration" id="narration">
+            <span class="narr-time mono" id="narrTime">t = 0</span>
+            <!-- WHY the scheduler did what it did at this instant -->
+            <div class="decision" id="decision" aria-live="polite"></div>
+            <ul class="narr-lines" id="narrLines"></ul>
+          </div>
+          <!-- the life cycle of the process being followed (click any process to follow it) -->
+          <div class="lifeline" id="lifeline" aria-live="polite"></div>
+        </section>
+
+        <!-- Transport: play / pause / step / reset, scrubber, speed -->
+        <section class="panel transport" aria-label="Playback">
+          <div class="transport-buttons">
+            <button type="button" class="tbtn" id="btnReset" title="Reset (Home)" aria-label="Reset">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 4.5V9h4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button type="button" class="tbtn" id="btnPrevEvent" title="Previous event (Shift + Left arrow)" aria-label="Jump to the previous event">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.5 6.5v11L4 12zM20 6.5v11L12.5 12z" fill="currentColor"/></svg>
+            </button>
+            <button type="button" class="tbtn" id="btnBack" title="Step back (Left arrow)" aria-label="Step back">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="6" width="2.4" height="12" rx="1" fill="currentColor"/><path d="M18.5 6.5v11L9.8 12z" fill="currentColor"/></svg>
+            </button>
+            <button type="button" class="tbtn tbtn-main" id="btnPlay" title="Play / pause (Space)" aria-label="Play">
+              <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+              <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor"/><rect x="13.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor"/></svg>
+            </button>
+            <button type="button" class="tbtn" id="btnStep" title="Step forward (Right arrow)" aria-label="Step forward">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 6.5v11l8.7-5.5z" fill="currentColor"/><rect x="16.6" y="6" width="2.4" height="12" rx="1" fill="currentColor"/></svg>
+            </button>
+            <button type="button" class="tbtn" id="btnNextEvent" title="Next event (Shift + Right arrow)" aria-label="Jump to the next event">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5v11l7.5-5.5zM12.5 6.5v11l7.5-5.5z" fill="currentColor"/></svg>
+            </button>
+          </div>
+
+          <div class="scrubber">
+            <div class="scrub-track">
+              <!-- one marker per instant where the scheduler acted (click to jump there) -->
+              <div class="scrub-markers" id="scrubMarkers"></div>
+              <input type="range" id="scrub" min="0" max="1" step="1" value="0" aria-label="Simulation time">
+            </div>
+            <div class="scrub-scale mono"><span>0</span><span id="scrubNow">t = 0</span><span id="scrubMax">0</span></div>
+            <div class="marker-legend" aria-hidden="true">
+              <span class="is-preempt">↩ preempt</span><span class="is-quantum">↻ quantum</span><span class="is-complete">✓ finish</span><span class="is-switch">⇄ switch</span><span class="is-dispatch">▶ dispatch</span><span class="is-arrive">+ arrival</span>
+            </div>
+          </div>
+
+          <label class="speed">
+            <span class="speed-label">Speed</span>
+            <input type="range" id="speed" min="0" max="100" step="1" value="49" aria-label="Playback speed">
+            <output class="mono" id="speedOut" for="speed">1.5 ticks/s</output>
+          </label>
+        </section>
+
+        <!-- Animated counters -->
+        <section class="metrics" aria-label="Live metrics">
+          <div class="tile">
+            <span class="tile-label">Avg waiting</span>
+            <span class="tile-value mono" id="mWait">-</span>
+            <span class="tile-sub" id="mWaitSub">over finished processes</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Avg turnaround</span>
+            <span class="tile-value mono" id="mTat">-</span>
+            <span class="tile-sub" id="mTatSub">over finished processes</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Avg response</span>
+            <span class="tile-value mono" id="mResp">-</span>
+            <span class="tile-sub" id="mRespSub">over started processes</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">CPU utilization</span>
+            <span class="tile-value mono" id="mUtil">-</span>
+            <span class="tile-sub">useful work since the first arrival</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Finished</span>
+            <span class="tile-value mono" id="mDone">-</span>
+            <span class="tile-sub" id="mDoneSub">processes</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Switches</span>
+            <span class="tile-value mono" id="mSwitch">-</span>
+            <span class="tile-sub" id="mSwitchSub">between processes</span>
+          </div>
+        </section>
+
+        <!-- Live Gantt chart -->
+        <section class="panel gantt-panel" aria-labelledby="hGantt">
+          <header class="panel-head">
+            <h2 id="hGantt">Gantt chart</h2>
+            <div class="legend" aria-label="Legend">
+              <span class="legend-item"><i class="legend-swatch is-run"></i>Running</span>
+              <span class="legend-item"><i class="legend-swatch is-wait"></i>Waiting in the ready queue</span>
+              <span class="legend-item"><i class="legend-swatch is-cs"></i>Context switch</span>
+              <span class="legend-item"><i class="legend-swatch is-idle"></i>Idle</span>
+            </div>
+          </header>
+          <!-- top row: what the CPU does; below: one lane per process -->
+          <div class="gantt-body">
+            <div class="gantt-side" id="ganttLabels" aria-hidden="true"></div>
+            <div class="gantt-scroll" id="ganttScroll">
+              <div class="gantt-track" id="ganttTrack"></div>
+            </div>
+            <div class="gantt-side gantt-side-right" id="ganttCounters" aria-hidden="true"></div>
+          </div>
+        </section>
+
+        <div class="split">
+          <!-- Per-process table (the table view of everything above) -->
+          <section class="panel" aria-labelledby="hLive">
+            <header class="panel-head">
+              <h2 id="hLive">Process table</h2>
+            </header>
+            <div class="table-wrap">
+              <table class="live-table">
+                <thead>
+                  <tr>
+                    <th scope="col">PID</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Arr</th>
+                    <th scope="col">Burst</th>
+                    <th scope="col">Left</th>
+                    <th scope="col">Pri</th>
+                    <th scope="col">Done at</th>
+                    <th scope="col">Turnaround</th>
+                    <th scope="col">Waiting</th>
+                    <th scope="col">Response</th>
+                  </tr>
+                </thead>
+                <tbody id="liveBody"></tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="7">Average</td>
+                    <td id="footTat">-</td>
+                    <td id="footWait">-</td>
+                    <td id="footResp">-</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </section>
+
+          <!-- Event log: every engine event up to the current time -->
+          <section class="panel log-panel" aria-labelledby="hLog">
+            <header class="panel-head">
+              <h2 id="hLog">Event log</h2>
+              <span class="panel-meta mono" id="logCount"></span>
+            </header>
+            <ol class="log" id="log"></ol>
+          </section>
+        </div>
+      </div>
+
+      <!-- ===============================================================
+           COMPARE VIEW
+           =============================================================== -->
+      <div class="view" id="viewCompare" role="tabpanel" aria-labelledby="tabCompare" hidden>
+        <section class="panel" aria-labelledby="hCharts">
+          <header class="panel-head">
+            <h2 id="hCharts">Every algorithm, same workload</h2>
+            <span class="panel-meta" id="compareMeta"></span>
+          </header>
+          <div class="charts">
+            <figure class="chart-card">
+              <figcaption><span class="chart-title">Average waiting time</span><span class="chart-sub">ticks · lower is better</span></figcaption>
+              <canvas data-metric="waiting" role="img" aria-label="Bar chart of average waiting time per algorithm; the same values are in the results table"></canvas>
+            </figure>
+            <figure class="chart-card">
+              <figcaption><span class="chart-title">Average turnaround time</span><span class="chart-sub">ticks · lower is better</span></figcaption>
+              <canvas data-metric="turnaround" role="img" aria-label="Bar chart of average turnaround time per algorithm; the same values are in the results table"></canvas>
+            </figure>
+            <figure class="chart-card">
+              <figcaption><span class="chart-title">Average response time</span><span class="chart-sub">ticks · lower is better</span></figcaption>
+              <canvas data-metric="response" role="img" aria-label="Bar chart of average response time per algorithm; the same values are in the results table"></canvas>
+            </figure>
+            <figure class="chart-card">
+              <figcaption><span class="chart-title">Context switches</span><span class="chart-sub">count · lower is better</span></figcaption>
+              <canvas data-metric="switches" role="img" aria-label="Bar chart of context switches per algorithm; the same values are in the results table"></canvas>
+            </figure>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="hCompareTable">
+          <header class="panel-head">
+            <h2 id="hCompareTable">Results</h2>
+            <span class="panel-meta">★ = best for that column</span>
+          </header>
+          <div class="table-wrap">
+            <table class="compare-table" id="compareTable">
+              <thead>
+                <tr>
+                  <th scope="col">Algorithm</th>
+                  <th scope="col">Avg waiting</th>
+                  <th scope="col">Avg turnaround</th>
+                  <th scope="col">Avg response</th>
+                  <th scope="col">Switches</th>
+                  <th scope="col">CPU util.</th>
+                  <th scope="col">Makespan</th>
+                  <th scope="col"><span class="sr-only">Open</span></th>
+                </tr>
+              </thead>
+              <tbody id="compareBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="hSchedules">
+          <header class="panel-head">
+            <h2 id="hSchedules">Schedules side by side</h2>
+            <span class="panel-meta">same time scale</span>
+          </header>
+          <div class="schedules" id="schedules"></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+  <script src="engine.js"></script>
+  <script src="ui.js"></script>
+</body>
+</html>

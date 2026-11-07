@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine Tests</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --line: #d1d9e0;
+    --card: #f6f8fa;
+    --pass: #1a7f37;
+    --fail: #cf222e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --line: #3d444d;
+      --card: #151b23;
+      --pass: #3fb950;
+      --fail: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 980px;
+    padding: 24px 16px 64px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .muted { color: var(--muted); }
+  #summary { font-size: 1.1rem; font-weight: 600; margin: 12px 0 4px; }
+  .pass { color: var(--pass); }
+  .fail { color: var(--fail); }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 0;
+    background: var(--card);
+  }
+  .card h3 { font-size: 1rem; margin: 0; }
+  .card p { margin: 4px 0 8px; }
+  ul.checks { list-style: none; padding: 0; margin: 8px 0; }
+  ul.checks li { padding: 1px 0; }
+  .detail { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; white-space: pre-wrap; margin-left: 1.4em; }
+  .gantt {
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 0.85rem;
+    overflow-x: auto;
+    white-space: nowrap;
+    padding: 6px 0;
+  }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 0.85rem; margin: 6px 0; }
+  th, td { border: 1px solid var(--line); padding: 3px 8px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  tfoot td { font-weight: 600; }
+  details { margin: 6px 0; }
+  details ol { font-size: 0.85rem; margin: 6px 0; padding-left: 1.6em; }
+  .caption { font-weight: 600; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <h1>engine.js test report</h1>
+  <p class="muted">Opening this page runs every test against <code>engine.js</code>.
+    Each worked example lists its Gantt chart and metrics so you can compare
+    them with a hand calculation. The textbook test also prints its results
+    to the browser console (press F12).</p>
+  <p id="summary">Running…</p>
+  <p id="conventions" class="muted"></p>
+  <div id="out"></div>
+
+  <script src="engine.js"></script>
+  <script>
+  "use strict";
+
+  /* ==========================================================================
+   * A tiny test framework (nothing to install).
+   * test(name, note, body) runs body(); the expect* calls inside it record
+   * checks. run() and show() keep results so the page can display their
+   * Gantt chart, metrics table and event log.
+   * ======================================================================== */
+  const suites = [];
+  let current = null;
+
+  function test(name, note, body) {
+    current = { name, note, checks: [], shown: [], error: null };
+    try {
+      body();
+    } catch (err) {
+      current.error = err;
+    }
+    suites.push(current);
+  }
+
+  function expectEqual(actual, expected, label) {
+    const ok = JSON.stringify(actual) === JSON.stringify(expected);
+    current.checks.push({ ok, label, expected, actual });
+  }
+
+  function expectClose(actual, expected, label) {
+    const ok = Math.abs(actual - expected) < 1e-9;
+    current.checks.push({ ok, label, expected, actual });
+  }
+
+  function expectTrue(condition, label) {
+    current.checks.push({ ok: Boolean(condition), label, expected: true, actual: Boolean(condition) });
+  }
+
+  function expectThrows(fn, label) {
+    let threw = false;
+    try { fn(); } catch (err) { threw = true; }
+    current.checks.push({ ok: threw, label, expected: "an error", actual: threw ? "an error" : "no error" });
+  }
+
+  /* ---- Helpers ------------------------------------------------------------ */
+  const P = (pid, arrival, burst, priority) => ({ pid, arrival, burst, priority });
+
+  // Shows a result under the current test.
+  function show(result, caption) {
+    current.shown.push({ caption: caption || "", result });
+    return result;
+  }
+
+  // Runs one algorithm (options.algorithm) and shows the result.
+  function run(processes, options, caption) {
+    return show(Engine.simulate(processes, options), caption);
+  }
+
+  const gantt = (result) => Engine.timelineText(result.timeline);
+
+  // One metric for every process, in input order.
+  const col = (result, field) => result.metrics.map((m) => m[field]);
+
+  // The aging steps as short text, for example "t=6 P2 4->3".
+  function agingSteps(result) {
+    return result.events
+      .filter((e) => e.type === "AGE")
+      .map((e) => `t=${e.t} ${e.pid} ${e.before}->${e.after}`);
+  }
+
+  // The priority resets (boost ending) as short text, for example "t=10 P2 2->4".
+  function priorityResets(result) {
+    return result.events
+      .filter((e) => e.type === "PRIORITY_RESET")
+      .map((e) => `t=${e.t} ${e.pid} ${e.before}->${e.after}`);
+  }
+
+  const TEXTBOOK = [P("P1", 0, 8), P("P2", 1, 4), P("P3", 2, 9), P("P4", 3, 5)];
+
+  /* ==========================================================================
+   * PART 1: the textbook workload, through all six algorithm functions.
+   * ======================================================================== */
+
+  test("Textbook workload: every algorithm",
+    "P1 (0, 8), P2 (1, 4), P3 (2, 9), P4 (3, 5). runTextbookTest() prints the same results to the console.", () => {
+      expectTrue(Engine.runTextbookTest(), "Engine.runTextbookTest() matches every hand calculation");
+
+      const expected = [
+        ["FCFS", () => Engine.fcfs(TEXTBOOK), 8.75],
+        ["SJF", () => Engine.sjf(TEXTBOOK), 7.75],
+        ["SRTF", () => Engine.srtf(TEXTBOOK), 6.5],
+        ["Priority NP", () => Engine.priorityNonPreemptive(TEXTBOOK), 8.75],
+        ["Priority P", () => Engine.priorityPreemptive(TEXTBOOK), 8.75],
+        ["RR q=2", () => Engine.roundRobin(TEXTBOOK, { quantum: 2 }), 12.75],
+        ["RR q=4", () => Engine.roundRobin(TEXTBOOK, { quantum: 4 }), 11.75],
+      ];
+      for (const [label, runIt, average] of expected) {
+        const result = show(runIt(), label);
+        expectClose(result.averages.waiting, average, `${label}: average waiting = ${average}`);
+      }
+    });
+
+  test("Each algorithm function equals simulate() with that algorithm",
+    "Engine.srtf(p, o) is simply simulate(p, { ...o, algorithm: \"SRTF\" }), and so on.", () => {
+      const options = { quantum: 3, contextSwitch: 1 };
+      const pairs = [
+        ["fcfs", "FCFS"], ["sjf", "SJF"], ["srtf", "SRTF"],
+        ["priorityNonPreemptive", "PRIO_NP"], ["priorityPreemptive", "PRIO_P"], ["roundRobin", "RR"],
+      ];
+      for (const [fn, id] of pairs) {
+        const a = JSON.stringify(Engine[fn](TEXTBOOK, options));
+        const b = JSON.stringify(Engine.simulate(TEXTBOOK, Object.assign({}, options, { algorithm: id })));
+        expectTrue(a === b, `Engine.${fn}() gives the same result as simulate() with "${id}"`);
+      }
+    });
+
+  test("Result shape: timeline blocks are { pid, start, end }",
+    "\"IDLE\" marks an idle CPU, \"CS\" a context switch (CS blocks also name the two processes).", () => {
+      const result = run([P("P1", 0, 2), P("P2", 0, 1), P("P3", 6, 1)], { algorithm: "FCFS", contextSwitch: 1 });
+      expectEqual(result.timeline, [
+        { pid: "P1", start: 0, end: 2 },
+        { pid: "CS", start: 2, end: 3, from: "P1", to: "P2" },
+        { pid: "P2", start: 3, end: 4 },
+        { pid: "IDLE", start: 4, end: 6 },
+        { pid: "P3", start: 6, end: 7 },
+      ], "timeline");
+      expectEqual(Object.keys(result.metrics[0]),
+        ["pid", "arrival", "burst", "priority", "firstRun", "completion", "turnaround", "waiting", "dispatchLatency", "response"],
+        "metric fields");
+    });
+
+  /* ==========================================================================
+   * PART 2: more worked examples. Every expected value was worked out by hand.
+   * ======================================================================== */
+
+  test("FCFS: classic textbook example",
+    "All three arrive at 0 and run in PID order.", () => {
+      const r = run([P("P1", 0, 24), P("P2", 0, 3), P("P3", 0, 3)], { algorithm: "FCFS" });
+      expectEqual(gantt(r), "P1 0-24 | P2 24-27 | P3 27-30", "Gantt chart");
+      expectEqual(col(r, "waiting"), [0, 24, 27], "waiting times");
+      expectEqual(col(r, "turnaround"), [24, 27, 30], "turnaround times");
+      expectClose(r.averages.waiting, 17, "average waiting = 17");
+    });
+
+  test("SJF (non-preemptive): classic textbook example",
+    "All arrive at 0; shortest burst first.", () => {
+      const r = run([P("P1", 0, 6), P("P2", 0, 8), P("P3", 0, 7), P("P4", 0, 3)], { algorithm: "SJF" });
+      expectEqual(gantt(r), "P4 0-3 | P1 3-9 | P3 9-16 | P2 16-24", "Gantt chart");
+      expectEqual(col(r, "waiting"), [3, 16, 9, 0], "waiting times");
+      expectClose(r.averages.waiting, 7, "average waiting = 7");
+    });
+
+  test("Tie-break: earlier arrival first",
+    "PA and PB both have burst 3. PB arrived earlier, so it goes first.", () => {
+      const r = run([P("PA", 2, 3), P("PB", 1, 3), P("PC", 0, 4)], { algorithm: "SJF" });
+      expectEqual(gantt(r), "PC 0-4 | PB 4-7 | PA 7-10", "Gantt chart");
+    });
+
+  test("Tie-break: same arrival, lower PID first (compared naturally)",
+    "Entered as P10, P2, P1, all at t=0. PID order is P1, P2, P10 (P2 before P10, not text order).", () => {
+      const fcfsResult = run([P("P10", 0, 1), P("P2", 0, 1), P("P1", 0, 1)], { algorithm: "FCFS" }, "FCFS");
+      expectEqual(gantt(fcfsResult), "P1 0-1 | P2 1-2 | P10 2-3", "FCFS: Gantt chart");
+      const sjfResult = run([P("P10", 0, 2), P("P2", 0, 2), P("P1", 0, 5)], { algorithm: "SJF" }, "SJF");
+      expectEqual(gantt(sjfResult), "P2 0-2 | P10 2-4 | P1 4-9", "SJF, equal bursts: Gantt chart");
+    });
+
+  test("SRTF tie: an equal challenger does not preempt",
+    "At t=2 both P1 and P2 have 2 ticks left, so P1 keeps the CPU.", () => {
+      const r = run([P("P1", 0, 4), P("P2", 2, 2)], { algorithm: "SRTF" });
+      expectEqual(gantt(r), "P1 0-4 | P2 4-6", "Gantt chart");
+      expectEqual(r.events.filter((e) => e.type === "PREEMPT").length, 0, "no preemption");
+    });
+
+  test("Priority (non-preemptive): classic textbook example",
+    "All arrive at 0; lower number = higher priority.", () => {
+      const r = run(
+        [P("P1", 0, 10, 3), P("P2", 0, 1, 1), P("P3", 0, 2, 4), P("P4", 0, 1, 5), P("P5", 0, 5, 2)],
+        { algorithm: "PRIO_NP" });
+      expectEqual(gantt(r), "P2 0-1 | P5 1-6 | P1 6-16 | P3 16-18 | P4 18-19", "Gantt chart");
+      expectEqual(col(r, "waiting"), [6, 0, 16, 18, 1], "waiting times");
+      expectClose(r.averages.waiting, 8.2, "average waiting = 8.2");
+    });
+
+  test("Priority (preemptive)",
+    "P2 (priority 1) arrives at t=1 and preempts P1 (priority 3).", () => {
+      const r = run([P("P1", 0, 5, 3), P("P2", 1, 2, 1)], { algorithm: "PRIO_P" });
+      expectEqual(gantt(r), "P1 0-1 | P2 1-3 | P1 3-7", "Gantt chart");
+      expectEqual(col(r, "waiting"), [2, 0], "waiting times");
+      expectEqual(col(r, "response"), [0, 0], "response times");
+    });
+
+  test("Round Robin (q=4): classic textbook example",
+    "After t=10 only P1 is left: each time its quantum ends nobody is waiting, so it keeps the CPU.", () => {
+      const r = run([P("P1", 0, 24), P("P2", 0, 3), P("P3", 0, 3)], { algorithm: "RR", quantum: 4 });
+      expectEqual(gantt(r), "P1 0-4 | P2 4-7 | P3 7-10 | P1 10-30", "Gantt chart");
+      expectEqual(col(r, "waiting"), [6, 4, 7], "waiting times");
+      expectEqual(col(r, "response"), [0, 4, 7], "response times");
+      expectClose(r.averages.waiting, 17 / 3, "average waiting = 5.67");
+      expectEqual(r.summary.switches, 3, "3 switches (P1->P2, P2->P3, P3->P1)");
+      expectEqual(r.events.filter((e) => e.type === "QUANTUM_RENEW").map((e) => e.t), [14, 18, 22, 26],
+        "quantum renewed at 14, 18, 22, 26");
+    });
+
+  test("Round Robin: arrival at the same instant a quantum expires",
+    "At t=2, P2 arrives exactly when P1's quantum (2) ends. The newcomer enters the queue first. " +
+    "The other convention is shown for comparison.", () => {
+      const procs = [P("P1", 0, 5), P("P2", 2, 3)];
+      const a = run(procs, { algorithm: "RR", quantum: 2 }, "Default: the newcomer enters the queue first");
+      expectEqual(gantt(a), "P1 0-2 | P2 2-4 | P1 4-6 | P2 6-7 | P1 7-8", "newcomer first: Gantt chart");
+      expectEqual(col(a, "completion"), [8, 7], "newcomer first: completion times");
+
+      const b = run(procs,
+        { algorithm: "RR", quantum: 2, conventions: { rrArrivalsBeforeExpired: false } },
+        "Other convention: the expired process enters the queue first");
+      expectEqual(gantt(b), "P1 0-4 | P2 4-6 | P1 6-7 | P2 7-8", "expired first: Gantt chart");
+      expectEqual(col(b, "completion"), [7, 8], "expired first: completion times");
+    });
+
+  /* ---- Idle CPU and context switches -------------------------------------- */
+
+  test("Idle gap: no context switch from an idle CPU",
+    "Context switch = 1, but the CPU is idle before P2, so P2 starts without one.", () => {
+      const r = run([P("P1", 0, 2), P("P2", 5, 3)], { algorithm: "FCFS", contextSwitch: 1 });
+      expectEqual(gantt(r), "P1 0-2 | IDLE 2-5 | P2 5-8", "Gantt chart");
+      expectEqual(r.summary.switches, 0, "no switches");
+      expectClose(r.summary.cpuUtilization, 5 / 8, "CPU utilization = 5/8");
+    });
+
+  test("Context switch between two processes",
+    "No switch at t=0. One switch (1 tick) when P1 finishes and P2 starts. Waiting counts only " +
+    "time in the ready queue (Silberschatz); the switch-in tick is P2's dispatch latency.", () => {
+      const r = run([P("P1", 0, 3), P("P2", 0, 2)], { algorithm: "FCFS", contextSwitch: 1 });
+      expectEqual(gantt(r), "P1 0-3 | CS 3-4 | P2 4-6", "Gantt chart");
+      expectEqual(col(r, "waiting"), [0, 3], "waiting times (ready queue only)");
+      expectEqual(col(r, "dispatchLatency"), [0, 1], "dispatch latency (P2 is switched in once)");
+      expectEqual(col(r, "turnaround"), [3, 6], "turnaround = burst + waiting + dispatch latency");
+      expectEqual(col(r, "response"), [0, 4], "response times (to first execution, after the switch)");
+      expectEqual(r.summary.switches, 1, "1 switch");
+      expectClose(r.summary.cpuUtilization, 5 / 6, "CPU utilization = 5/6");
+    });
+
+  test("Round Robin with context switches",
+    "q=2, switch=1. A switch is paid every time the CPU changes process.", () => {
+      const r = run([P("P1", 0, 3), P("P2", 0, 3)], { algorithm: "RR", quantum: 2, contextSwitch: 1 });
+      expectEqual(gantt(r), "P1 0-2 | CS 2-3 | P2 3-5 | CS 5-6 | P1 6-7 | CS 7-8 | P2 8-9", "Gantt chart");
+      expectEqual(col(r, "completion"), [7, 9], "completion times");
+      expectEqual(col(r, "waiting"), [3, 4], "waiting times (ready queue only)");
+      expectEqual(col(r, "dispatchLatency"), [1, 2], "dispatch latency");
+      expectEqual(col(r, "response"), [0, 3], "response times");
+      expectEqual(r.summary.switches, 3, "3 switches");
+    });
+
+  test("SRTF with context switches",
+    "P2 preempts P1 at t=1; both changes of process cost 1 tick.", () => {
+      const r = run([P("P1", 0, 5), P("P2", 1, 1)], { algorithm: "SRTF", contextSwitch: 1 });
+      expectEqual(gantt(r), "P1 0-1 | CS 1-2 | P2 2-3 | CS 3-4 | P1 4-8", "Gantt chart");
+      expectEqual(col(r, "waiting"), [2, 0], "waiting times (ready queue only)");
+      expectEqual(col(r, "dispatchLatency"), [1, 1], "dispatch latency");
+      expectEqual(col(r, "response"), [0, 1], "response times");
+    });
+
+  test("Arrival during a context switch",
+    "Switch = 2. P3 (1 tick) arrives at t=2, while P2 is being loaded. The switch is never " +
+    "interrupted, and P2 executes one tick (progress guarantee) before SRTF lets P3 preempt it at t=4.", () => {
+      const r = run([P("P1", 0, 6), P("P2", 1, 3), P("P3", 2, 1)], { algorithm: "SRTF", contextSwitch: 2 });
+      expectEqual(gantt(r), "P1 0-1 | CS 1-3 | P2 3-4 | CS 4-6 | P3 6-7 | CS 7-9 | P2 9-11 | CS 11-13 | P1 13-18",
+        "Gantt chart");
+      expectEqual(col(r, "completion"), [18, 11, 7], "completion times");
+      expectEqual(col(r, "response"), [0, 2, 4], "response times");
+      expectEqual(r.summary.switches, 4, "4 switches");
+    });
+
+  test("Progress guarantee: aging + preemptive Priority + context switches",
+    "Review issue 1. Aging every tick and a 2-tick switch used to make P1 and P2 swap 21 times with " +
+    "no work done (48 ticks for 6 ticks of work). Now every switch is followed by at least one tick of work.", () => {
+      const r = run([P("P1", 0, 3, 20), P("P2", 1, 3, 19)],
+        { algorithm: "PRIO_P", contextSwitch: 2, aging: { enabled: true, every: 1, by: 1 } });
+      expectEqual(gantt(r),
+        "P1 0-1 | CS 1-3 | P2 3-4 | CS 4-6 | P1 6-7 | CS 7-9 | P2 9-10 | CS 10-12 | P1 12-13 | CS 13-15 | P2 15-16",
+        "Gantt chart");
+      expectEqual(col(r, "completion"), [13, 16], "completion times");
+      expectEqual(col(r, "waiting"), [6, 6], "waiting times (ready queue only)");
+      const everySwitchFollowedByItsProcess = r.timeline.every((b, i) =>
+        b.pid !== "CS" || (r.timeline[i + 1] && r.timeline[i + 1].pid === b.to));
+      expectTrue(everySwitchFollowedByItsProcess, "every switch is followed by the process it loaded");
+    });
+
+  test("Progress guarantee: no livelock with higher number = higher priority",
+    "Review issue 2. With no upper limit on aging, the same swap used to repeat until simulate() threw " +
+    "\"did not finish\". It now ends, inside the bound validate() checks.", () => {
+      const procs = [P("P1", 0, 3, 5), P("P2", 1, 3, 6)];
+      const options = { algorithm: "PRIO_P", contextSwitch: 2, aging: { enabled: true, every: 1, by: 1 },
+        conventions: { lowerNumberIsHigherPriority: false } };
+      const r = run(procs, options);
+      expectEqual(r.summary.busy, 6, "all 6 ticks of work are done");
+      expectTrue(r.summary.switches <= r.summary.busy, "at most one switch per tick of work");
+      expectTrue(r.summary.makespan <= 1 + 6 * (1 + 2), "finishes within lastArrival + work x (1 + switch cost)");
+    });
+
+  /* ---- Aging ------------------------------------------------------------- */
+
+  test("Aging changes the order (Priority, non-preemptive)",
+    "Aging: +1 level every 5 ticks of waiting. Without aging P3 (3) beats P2 (4). " +
+    "With aging both reach 2 by t=11, and the tie goes to P2, which arrived first.", () => {
+      const procs = [P("P1", 0, 11, 1), P("P2", 1, 2, 4), P("P3", 2, 2, 3)];
+      const off = run(procs, { algorithm: "PRIO_NP" }, "Without aging");
+      expectEqual(gantt(off), "P1 0-11 | P3 11-13 | P2 13-15", "without aging: Gantt chart");
+
+      const on = run(procs, { algorithm: "PRIO_NP", aging: { enabled: true, every: 5, by: 1 } }, "With aging");
+      expectEqual(gantt(on), "P1 0-11 | P2 11-13 | P3 13-15", "with aging: Gantt chart");
+      expectEqual(agingSteps(on), ["t=6 P2 4->3", "t=7 P3 3->2", "t=11 P2 3->2", "t=12 P3 2->1"],
+        "with aging: aging steps");
+      expectEqual(priorityResets(on), ["t=11 P2 2->4", "t=13 P3 1->3"],
+        "with aging: each boost ends when that process starts running");
+    });
+
+  test("Aging boost ends when the process starts running (Priority, preemptive)",
+    "Review issue 9 (the agreed rule). P2 ages from 4 to 2 and gets the CPU at t=10, where its priority " +
+    "returns to its base 4. After its first tick, P3 (priority 3) beats it and preempts at t=11.", () => {
+      const r = run([P("P1", 0, 10, 1), P("P2", 0, 3, 4), P("P3", 8, 2, 3)],
+        { algorithm: "PRIO_P", aging: { enabled: true, every: 5, by: 1 } });
+      expectEqual(gantt(r), "P1 0-10 | P2 10-11 | P3 11-13 | P2 13-15", "Gantt chart");
+      expectEqual(agingSteps(r), ["t=5 P2 4->3", "t=10 P2 3->2"], "aging steps");
+      expectEqual(priorityResets(r), ["t=10 P2 2->4"], "the boost ends when P2 starts running");
+    });
+
+  test("Aging never makes a priority worse",
+    "Review issue 3. With an aging limit of 3, a process already better than the limit keeps its priority, " +
+    "and a worse one improves only down to the limit.", () => {
+      const better = run([P("P1", 0, 5, 0), P("P2", 0, 2, 1)],
+        { algorithm: "PRIO_NP", aging: { enabled: true, every: 1, by: 1, limit: 3 } }, "P2 starts better than the limit");
+      expectEqual(agingSteps(better), [], "P2 (priority 1) is not moved to 3");
+      const worse = run([P("P1", 0, 6, 0), P("P2", 0, 2, 6)],
+        { algorithm: "PRIO_NP", aging: { enabled: true, every: 1, by: 1, limit: 3 } }, "P2 starts worse than the limit");
+      expectEqual(agingSteps(worse), ["t=1 P2 6->5", "t=2 P2 5->4", "t=3 P2 4->3"], "P2 improves to 3 and stops");
+    });
+
+  test("Aging prevents starvation",
+    "PL (priority 5) faces an endless stream of priority-1 jobs S1, S2, … (burst 2, one every 2 ticks). " +
+    "Without aging PL waits for the whole stream; with aging (every 5, by 1) its times do not grow with the stream.", () => {
+      const stream = (n) => {
+        const w = [P("PL", 0, 3, 5)];
+        for (let i = 0; i < n; i++) w.push(P(`S${i + 1}`, 2 * i, 2, 1));
+        return w;
+      };
+      const pl = (r) => r.metrics.find((m) => m.pid === "PL");
+      const aging = { aging: { enabled: true, every: 5, by: 1 } };
+      for (const n of [50, 100]) {
+        expectEqual(pl(Engine.priorityNonPreemptive(stream(n))).firstRun, 2 * n, `${n} jobs, no aging: PL starts at t=${2 * n}`);
+        const np = pl(Engine.priorityNonPreemptive(stream(n), aging));
+        expectEqual([np.firstRun, np.completion], [20, 23], `${n} jobs, aging, non-preemptive: PL runs 20-23`);
+        const pp = pl(Engine.priorityPreemptive(stream(n), aging));
+        expectEqual([pp.firstRun, pp.completion], [20, 63],
+          `${n} jobs, aging, preemptive: PL gets one tick each time it ages to 1 (t=20, 41, 62) and completes at 63`);
+      }
+    });
+
+  /* ==========================================================================
+   * PART 3: the contract with the UI. Frames must contain everything needed
+   * to draw an instant without recomputing anything.
+   * ======================================================================== */
+
+  test("Frames carry the full state of every instant",
+    "FCFS, P1 (3) and P2 (2) at t=0, context switch = 1.", () => {
+      const r = run([P("P1", 0, 3), P("P2", 0, 2)], { algorithm: "FCFS", contextSwitch: 1 });
+      expectEqual(r.frames.length, r.summary.makespan + 1, "one frame per tick, plus a final frame");
+
+      const f0 = r.frames[0];
+      expectEqual(f0.cpu, { kind: "run", pid: "P1", quantum: null, quantumTick: null }, "t=0: the CPU runs P1");
+      expectEqual(f0.procs.map((p) => p.state), ["RUNNING", "READY"], "t=0: states");
+      expectEqual(f0.readyQueue, ["P2"], "t=0: P2 is in the ready queue");
+      expectEqual(f0.events.map((e) => e.type), ["ARRIVE", "ARRIVE", "DISPATCH", "FIRST_RUN"], "t=0: events");
+
+      const f3 = r.frames[3];
+      expectEqual(f3.cpu, { kind: "cs", pid: "P2", from: "P1", to: "P2", step: 1, total: 1 },
+        "t=3: switching from P1 to P2");
+      expectEqual(f3.procs.map((p) => p.state), ["TERMINATED", "READY"], "t=3: states");
+      expectEqual(f3.procs[1].switchingIn, true, "t=3: P2 is being switched in");
+      expectEqual(f3.readyQueue, [], "t=3: P2 has left the ready queue");
+      expectEqual(f3.events.map((e) => e.type), ["COMPLETE", "CS_START"], "t=3: events");
+      expectEqual(f3.timelineIndex, 1, "t=3: the tick belongs to timeline block 1 (the CS block)");
+      expectEqual(f3.procs[0].turnaround, 3, "t=3: P1's turnaround is already known");
+      expectEqual(f3.procs[1].waitedSoFar, 3, "t=3: P2 has waited 3 ticks so far");
+
+      const last = r.frames[r.frames.length - 1];
+      expectEqual(last.cpu.kind, "done", "final frame: the CPU is done");
+      expectEqual(last.procs.map((p) => p.state), ["TERMINATED", "TERMINATED"], "final frame: all terminated");
+      expectEqual(last.procs[1].waitedSoFar, last.procs[1].waiting,
+        "final frame: the live waiting counter equals the waiting time");
+      expectEqual(last.procs[1].dispatchLatency, 1, "final frame: P2's dispatch latency is the 1 switch tick");
+    });
+
+  /* ==========================================================================
+   * PART 4: input checking, determinism, purity.
+   * ======================================================================== */
+
+  test("Bad input is rejected", "", () => {
+    const ok = [P("P1", 0, 3)];
+    expectEqual(Engine.validate(ok, { algorithm: "FCFS" }), [], "a valid workload has no errors");
+    expectEqual(Engine.validate([{ pid: "P1", arrival: 0, burst: 2 }], { algorithm: "PRIO_NP" }), [],
+      "an empty priority is allowed (it defaults to 1)");
+    expectThrows(() => Engine.fcfs([], {}), "empty process list");
+    expectThrows(() => Engine.fcfs([P("P1", 0, 0)]), "burst time 0");
+    expectThrows(() => Engine.fcfs([P("P1", -1, 3)]), "negative arrival time");
+    expectThrows(() => Engine.fcfs([P("P1", 0, 2.5)]), "fractional burst time");
+    expectThrows(() => Engine.fcfs([P("P1", "0", 3)]), "arrival time given as text");
+    expectThrows(() => Engine.fcfs([P("P1", 0, 3), P("P1", 1, 2)]), "duplicate PID");
+    expectThrows(() => Engine.fcfs([P("IDLE", 0, 3)]), "PID \"IDLE\" is reserved");
+    expectThrows(() => Engine.fcfs([P("cs", 0, 3)]), "PID \"CS\" is reserved (any case)");
+    expectThrows(() => Engine.roundRobin(ok, { quantum: 0 }), "quantum 0");
+    expectThrows(() => Engine.fcfs(ok, { contextSwitch: -1 }), "negative context switch");
+    expectThrows(() => Engine.simulate(ok, { algorithm: "LOTTERY" }), "unknown algorithm");
+    expectThrows(() => Engine.priorityPreemptive(ok, { aging: { enabled: true, every: 0 } }),
+      "aging interval 0");
+    for (const name of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+      expectEqual(Engine.validate(ok, { algorithm: name }), [`Unknown algorithm "${name}".`],
+        `algorithm "${name}" is rejected, not crashed on (review issue 4)`);
+    }
+    const huge = Array.from({ length: 5000 }, (_, i) => P(`P${i + 1}`, 0, 20));
+    expectEqual(Engine.validate(huge, {}), ["The workload is too large to simulate."],
+      "5000 processes x burst 20 is rejected before it can exhaust memory (review issue 5)");
+    const biggestUiCase = Array.from({ length: 10 }, (_, i) => P(`P${i + 1}`, 0, 9999));
+    expectEqual(Engine.validate(biggestUiCase, {}), [], "10 processes with 99,990 ticks of work still fit");
+  });
+
+  test("CPU utilization and throughput are measured from the first arrival",
+    "Review issue 8. P1 arrives at t=10, and the CPU had nothing to do before that.", () => {
+      const late = run([P("P1", 10, 5)], { algorithm: "FCFS" }, "First arrival at t=10");
+      expectEqual(gantt(late), "IDLE 0-10 | P1 10-15", "Gantt chart");
+      expectClose(late.summary.cpuUtilization, 1, "utilization = 5 / (15 - 10) = 100%");
+      expectClose(late.summary.throughput, 1 / 5, "throughput = 1 / (15 - 10)");
+      const gap = run([P("P1", 2, 2), P("P2", 6, 2)], { algorithm: "FCFS" }, "A gap between processes");
+      expectClose(gap.summary.cpuUtilization, 4 / 6, "idle time after the first arrival still counts: 4 / (8 - 2)");
+    });
+
+  test("Same input, same result; the input is never modified", "", () => {
+    const procs = Engine.generateWorkload({ seed: 7, count: 6 });
+    const before = JSON.stringify(procs);
+    const options = { quantum: 2, contextSwitch: 1, aging: { enabled: true } };
+    const first = JSON.stringify(Engine.compareAll(procs, options));
+    const second = JSON.stringify(Engine.compareAll(procs, options));
+    expectTrue(first === second, "running Compare All twice gives identical results");
+    expectEqual(JSON.stringify(procs), before, "the caller's process list is unchanged");
+    expectEqual(Engine.generateWorkload({ seed: 42 }), Engine.generateWorkload({ seed: 42 }),
+      "same seed, same workload");
+    expectTrue(
+      JSON.stringify(Engine.generateWorkload({ seed: 1 })) !== JSON.stringify(Engine.generateWorkload({ seed: 2 })),
+      "different seeds, different workloads");
+  });
+
+  /* ==========================================================================
+   * PART 5: invariants. Rules that must hold for ANY workload, checked on
+   * many random ones.
+   * ======================================================================== */
+
+  function checkResult(r, where, flag) {
+    const s = r.summary;
+    const byPid = new Map(r.processes.map((p) => [p.pid, p]));
+    const rule = Engine.ALGORITHMS[r.algorithm];
+    const sorted = (list) => list.slice().sort();
+
+    // 1. One frame per tick, plus the final frame, numbered 0, 1, 2, ...
+    if (r.frames.length !== s.makespan + 1) flag(`${where}: ${r.frames.length} frames for makespan ${s.makespan}`);
+    r.frames.forEach((f, i) => { if (f.t !== i) flag(`${where}: frame ${i} says t=${f.t}`); });
+
+    // 2. The timeline covers [0, makespan) with no gap and no overlap.
+    let clock = 0;
+    for (const b of r.timeline) {
+      if (b.start !== clock || b.end <= b.start) flag(`${where}: timeline gap or overlap at t=${b.start}`);
+      clock = b.end;
+    }
+    if (clock !== s.makespan) flag(`${where}: the timeline ends at ${clock}, not ${s.makespan}`);
+
+    // 3. Every process executes exactly its burst, and never before it arrives.
+    const ran = new Map(r.processes.map((p) => [p.pid, 0]));
+    for (const b of r.timeline) {
+      if (b.pid === "IDLE" || b.pid === "CS") continue;
+      ran.set(b.pid, ran.get(b.pid) + b.end - b.start);
+      if (b.start < byPid.get(b.pid).arrival) flag(`${where}: ${b.pid} runs before it arrives`);
+    }
+    for (const p of r.processes) {
+      if (ran.get(p.pid) !== p.burst) flag(`${where}: ${p.pid} ran ${ran.get(p.pid)} ticks, burst is ${p.burst}`);
+    }
+
+    // 4. Time accounting: work + idle + switching = total time.
+    const work = r.processes.reduce((sum, p) => sum + p.burst, 0);
+    if (s.busy !== work) flag(`${where}: busy ${s.busy} != total burst ${work}`);
+    if (s.busy + s.idle + s.switching !== s.makespan) flag(`${where}: busy + idle + switching != makespan`);
+    if (s.switching !== s.switches * r.options.contextSwitch) flag(`${where}: switching ticks != switches x cost`);
+
+    // 4b. Progress guarantee: every switch is followed by work for the process it
+    //     loaded, so there are never more switches than ticks of work, and the run
+    //     ends inside the bound validate() relies on.
+    if (s.switches > s.busy) flag(`${where}: ${s.switches} switches for ${s.busy} ticks of work`);
+    r.timeline.forEach((b, i) => {
+      if (b.pid === "CS" && !(r.timeline[i + 1] && r.timeline[i + 1].pid === b.to)) flag(`${where}: switch at t=${b.start} not followed by ${b.to}`);
+    });
+    const lastArrival = Math.max(...r.processes.map((p) => p.arrival));
+    if (s.makespan > lastArrival + work * (1 + r.options.contextSwitch)) flag(`${where}: makespan beyond the guaranteed bound`);
+
+    // 4c. Aging only ever improves a priority.
+    for (const e of r.events) if (e.type === "AGE" && !(e.after < e.before)) flag(`${where}: aging made ${e.pid} worse`);
+
+    // 5. Every frame agrees with itself.
+    for (const f of r.frames) {
+      const running = f.procs.filter((p) => p.state === "RUNNING").map((p) => p.pid);
+      const expected = f.cpu.kind === "run" ? [f.cpu.pid] : [];
+      if (JSON.stringify(running) !== JSON.stringify(expected)) flag(`${where}: t=${f.t} RUNNING does not match the CPU`);
+
+      const ready = sorted(f.procs.filter((p) => p.state === "READY" && !p.switchingIn).map((p) => p.pid));
+      if (JSON.stringify(ready) !== JSON.stringify(sorted(f.readyQueue))) {
+        flag(`${where}: t=${f.t} ready queue does not match READY states`);
+      }
+      for (const p of f.procs) {
+        const notArrived = byPid.get(p.pid).arrival > f.t;
+        if (notArrived !== (p.state === "NEW")) flag(`${where}: t=${f.t} ${p.pid} NEW state is wrong`);
+      }
+    }
+
+    // 6. Metrics.
+    const last = r.frames[r.frames.length - 1];
+    r.metrics.forEach((m, i) => {
+      if (last.procs[i].state !== "TERMINATED") flag(`${where}: ${m.pid} never terminated`);
+      if (last.procs[i].waitedSoFar !== m.waiting) {
+        flag(`${where}: ${m.pid} ready-queue time ${last.procs[i].waitedSoFar} != waiting ${m.waiting}`);
+      }
+      if (m.turnaround !== m.burst + m.waiting + m.dispatchLatency) {
+        flag(`${where}: ${m.pid} turnaround != burst + waiting + dispatch latency`);
+      }
+      if (m.response < 0 || m.response > m.waiting + m.dispatchLatency) flag(`${where}: ${m.pid} response ${m.response} out of range`);
+      // Without preemption a process runs in one piece after one switch-in, so
+      // response = waiting + dispatch latency.
+      if (!rule.preemptive && !rule.usesQuantum && m.response !== m.waiting + m.dispatchLatency) {
+        flag(`${where}: ${m.pid} response != waiting + dispatch latency in a non-preemptive algorithm`);
+      }
+    });
+  }
+
+  test("Invariants hold on random workloads",
+    "100 random workloads x 6 algorithms x 8 settings (quantum 1/3, switch 0/2, aging off/on every 1-3 ticks). " +
+    "Also: with no switch cost SRTF has the lowest average waiting time (it is provably optimal), " +
+    "and RR with a huge quantum behaves exactly like FCFS.", () => {
+      const problems = [];
+      const flag = (message) => { if (problems.length < 15) problems.push(message); };
+      let runs = 0;
+
+      for (let seed = 1; seed <= 100; seed++) {
+        const procs = Engine.generateWorkload({ seed, count: 1 + (seed % 7), maxArrival: 12, maxBurst: 8, maxPriority: 4 });
+
+        for (const contextSwitch of [0, 2]) {
+          for (const quantum of [1, 3]) {
+            for (const agingOn of [false, true]) {
+              // aging every 1-3 ticks with a 2-tick switch is the review's thrash case
+              const options = { quantum, contextSwitch, aging: { enabled: agingOn, every: 1 + (seed % 3), by: 1 } };
+              const where = `seed ${seed}, q=${quantum}, cs=${contextSwitch}, aging=${agingOn}`;
+              const results = Engine.compareAll(procs, options);
+              for (const r of results) {
+                runs++;
+                checkResult(r, `${r.algorithm} (${where})`, flag);
+              }
+              if (contextSwitch === 0) {
+                const srtfAvg = results.find((r) => r.algorithm === "SRTF").averages.waiting;
+                for (const r of results) {
+                  if (srtfAvg > r.averages.waiting + 1e-9) {
+                    flag(`SRTF average waiting ${srtfAvg} > ${r.algorithm} ${r.averages.waiting} (${where})`);
+                  }
+                }
+              }
+            }
+          }
+
+          const fcfsResult = Engine.fcfs(procs, { contextSwitch });
+          const rrResult = Engine.roundRobin(procs, { quantum: 100, contextSwitch });
+          runs += 2;
+          if (gantt(fcfsResult) !== gantt(rrResult)) {
+            flag(`RR with a huge quantum differs from FCFS (seed ${seed}, cs=${contextSwitch})`);
+          }
+        }
+      }
+      expectEqual(problems, [], `no rule broken in ${runs} simulations`);
+    });
+
+  /* ==========================================================================
+   * Report
+   * ======================================================================== */
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  const fmt = (x) => (Number.isInteger(x) ? String(x) : x.toFixed(2));
+
+  function renderResult(caption, r) {
+    const box = document.createDocumentFragment();
+    box.append(el("div", "caption", `${caption ? caption + " · " : ""}${r.algorithmName}`));
+    box.append(el("div", "gantt", gantt(r)));
+
+    const wrap = el("div", "scroll");
+    const table = el("table");
+    const head = el("tr");
+    ["PID", "Arrival", "Burst", "Priority", "Completion", "Turnaround", "Waiting", "Switch-in", "Response"]
+      .forEach((h) => head.append(el("th", "", h)));
+    table.appendChild(el("thead")).append(head);
+    const body = table.appendChild(el("tbody"));
+    for (const m of r.metrics) {
+      const row = el("tr");
+      [m.pid, m.arrival, m.burst, m.priority, m.completion, m.turnaround, m.waiting, m.dispatchLatency, m.response]
+        .forEach((v) => row.append(el("td", "", String(v))));
+      body.append(row);
+    }
+    const a = r.averages;
+    const foot = el("tr");
+    ["Average", "", "", "", "", fmt(a.turnaround), fmt(a.waiting), "", fmt(a.response)]
+      .forEach((v) => foot.append(el("td", "", v)));
+    table.appendChild(el("tfoot")).append(foot);
+    wrap.append(table);
+    box.append(wrap);
+
+    const s = r.summary;
+    box.append(el("div", "muted",
+      `Makespan ${s.makespan} · CPU utilization ${(s.cpuUtilization * 100).toFixed(1)}% · ` +
+      `switches ${s.switches} · switching ticks ${s.switching} · idle ticks ${s.idle}`));
+
+    const log = el("details");
+    log.append(el("summary", "", `Event log (${r.events.length} events)`));
+    const list = el("ol");
+    for (const e of r.events) list.append(el("li", "", `t=${e.t}: ${e.note}`));
+    log.append(list);
+    box.append(log);
+    return box;
+  }
+
+  function render() {
+    const out = document.getElementById("out");
+    let total = 0;
+    let failed = 0;
+
+    for (const s of suites) {
+      const failedChecks = s.checks.filter((c) => !c.ok).length;
+      const bad = failedChecks + (s.error ? 1 : 0);
+      total += s.checks.length + (s.error ? 1 : 0);
+      failed += bad;
+
+      const card = el("section", "card");
+      card.append(el("h3", bad ? "fail" : "pass",
+        `${bad ? "✗" : "✓"} ${s.name} (${s.checks.length - failedChecks}/${s.checks.length} checks)`));
+      if (s.note) card.append(el("p", "muted", s.note));
+      if (s.error) card.append(el("div", "detail fail", `Crashed: ${s.error.message}`));
+
+      const list = el("ul", "checks");
+      for (const c of s.checks) {
+        const li = el("li", c.ok ? "pass" : "fail", `${c.ok ? "✓" : "✗"} ${c.label}`);
+        if (!c.ok) {
+          li.append(el("div", "detail", `expected: ${JSON.stringify(c.expected, null, 1)}`));
+          li.append(el("div", "detail", `actual:   ${JSON.stringify(c.actual, null, 1)}`));
+        }
+        list.append(li);
+      }
+      card.append(list);
+      for (const { caption, result } of s.shown) card.append(renderResult(caption, result));
+      out.append(card);
+    }
+
+    const summary = document.getElementById("summary");
+    summary.className = failed ? "fail" : "pass";
+    summary.textContent = failed ? `${failed} of ${total} checks failed` : `All ${total} checks passed`;
+
+    const c = Engine.DEFAULT_CONVENTIONS;
+    document.getElementById("conventions").textContent =
+      "Conventions in engine.js: ties go to the earlier arrival, then the lower PID; " +
+      (c.lowerNumberIsHigherPriority ? "lower number = higher priority" : "higher number = higher priority") +
+      "; RR: " +
+      (c.rrArrivalsBeforeExpired ? "a newcomer enters the queue before the expired process" : "the expired process enters the queue before a newcomer") +
+      ".";
+  }
+
+  render();
+  </script>
+</body>
+</html>
